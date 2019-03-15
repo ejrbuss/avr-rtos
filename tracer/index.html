@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <title>RTOS Trace</title>
+        <meta name="description" content="RTOS Trace">
+        <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" integrity="sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T" crossorigin="anonymous">
+        <script src="https://code.jquery.com/jquery-3.3.1.slim.min.js" integrity="sha384-q8i/X+965DzO0rT7abK41JStQIAqVgRVzpbzo5smXKp4YfRvH+8abtTE1Pi6jizo" crossorigin="anonymous"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js" integrity="sha384-UO2eT0CpHqdSJQ6hJty5KVphtPhzWj9WO1clHTMGa3JDZwrnQq4sF86dIHNDz0W1" crossorigin="anonymous"></script>
+        <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js" integrity="sha384-JjSmVgyd0p3pXB1rRibZUAYoIIy6OrQ6VrjIEaFf/nJGzIxFDsf4x0xIM+B07jRM" crossorigin="anonymous"></script>
+        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+        <script>
+            let interval;
+            const trace_id = 'trace';
+            const memory_id = 'memory';
+            let log = {};
+            let state = {
+                event: 0,
+                heap: 0,
+                memory_values: [],
+                memory_handles: [],
+                event_to_name: {},
+                instance_to_name: { '-1': 'OS' },
+                current_value: {},
+                current_time: 0,
+
+                current_count: {},
+                current_last_time: {},
+                current_total_time: {},
+                current_min_time: {},
+                current_max_time: {},
+            };
+            let request_num = 0;
+            let MAX_REQUESTS = 200;
+
+            // reset the data stream
+            fetch('/reset');
+
+            const get_data = () => {
+                if (request_num++ > MAX_REQUESTS) {
+                    clearInterval(interval);
+                }
+                fetch('/data')
+                    .then(response => response.json())
+                    .then(data_list => {
+                        data_list.forEach(parse_data);
+                        if (data_list.length > 0) {
+                            request_num = 0;
+                            const l = Object.keys(state.instance_to_name).length;
+                            make_trace(l);
+                            make_table();
+                            $('.spin-box').remove();
+                        }
+                    });
+            };
+
+            const make_table = () => {
+                const html = [];
+                const l = Object.keys(state.instance_to_name).length;
+                for (let i = -1; i < l - 1; i++) {
+                    html.push(`
+                        <tr>
+                            <th scope="row">${state.instance_to_name[i]}</th>
+                            <td>${(state.current_count[i])}</td>
+                            <td>${(state.current_total_time[i] / state.current_time * 100).toFixed(1)}</td>
+                            <td>${(state.current_total_time[i])}</td>
+                            <td>${(state.current_total_time[i] / state.current_count[-1]).toFixed(1)}</td>
+                            <td>${(state.current_min_time[i])}</td>
+                            <td>${(state.current_max_time[i])}</td>
+                        </tr>
+                    `);
+                }
+                $('#metrics').html(html.join(''));
+            };
+
+            const make_memory = () => {
+                const data = [{
+                    values : state.memory_values,
+                    labels : state.memory_handles,
+                    type   : 'pie',
+                }];
+                const layout = {
+                    title: `Heap Usage (${state.heap} Bytes)`,
+                };
+                Plotly.newPlot(memory_id, data, layout);
+            };
+
+            const make_trace = (l) => {
+                const traces = [];
+                const layout = {
+                    title: 'Task Uptime',
+                    xaxis: {
+                        title          : 'Time (ms)',
+                        rangeslider: {}
+                    }, yaxis: {
+                        fixedrange     : true,
+                        showgrid       : false,
+                        showticklabels : false,
+                    },
+                    responsive: true,
+                };
+                for (let i = l - 2; i >= -1; i--) {
+                    traces.push({
+                        y : log[i].y,
+                        x : log[i].x,
+                        mode : 'lines',
+                        name : state.instance_to_name[i],
+                    });
+                }
+                Plotly.newPlot(trace_id, traces, layout);
+            };
+
+            const stamp = () => {
+                const l = Object.keys(state.instance_to_name).length;
+                for (let i = -1; i < l - 1; i++) {
+                    log[i].y.push(state.current_value[i] + (i + 1) * 1.5 + .5);
+                    log[i].x.push(state.current_time);
+                }
+            };
+
+            const update_time_metrics = (time, instance) => {
+                const count = (state.current_count[instance] === undefined
+                    ? 0
+                    : state.current_count[instance]
+                );
+                const last_time = state.current_last_time[instance];
+                const time_passed = time - last_time;
+                const min_time = (state.current_min_time[instance] === undefined
+                    ? Infinity
+                    : state.current_min_time[instance]
+                );
+                const max_time    = (state.current_max_time[instance] === undefined
+                    ? -Infinity
+                    : state.current_max_time[instance]
+                );
+                const total_time  = (state.current_total_time[instance] === undefined
+                    ? 0
+                    : state.current_total_time[instance]
+                );
+                state.current_count[instance] = count + 1;
+                state.current_total_time[instance] = total_time + time_passed;
+                if (time_passed < min_time) {
+                    state.current_min_time[instance] = time_passed;
+                }
+                if (time_passed > max_time) {
+                    state.current_max_time[instance] = time_passed;
+                }
+            };
+
+            const parse_data = (data) => {
+                if (data.name) {
+                    console.log('received:', data);
+                    if (data.name === 'Def_Task') {
+                        log[data.instance] = { x: [], y: [] };
+                        state.instance_to_name[data.instance] = data.handle;
+                        state.current_value[data.instance] = 0;
+                        stamp();
+                        return;
+                    }
+                    if (data.name === 'Def_Event') {
+                        state.event_to_name[data.event] = data.handle;
+                        return;
+                    }
+                    if (data.name === 'Def_Alloc') {
+                        state.memory_values[0] -= data.bytes;
+                        state.memory_values.push(data.bytes);
+                        state.memory_handles.push(data.handle);
+                        make_memory();
+                        return;
+                    }
+                    if (data.name === 'Mark_Init') {
+                        // Re init
+                        log = {};
+                        state = {
+                            event: 0,
+                            heap: 0,
+                            memory_values: [],
+                            memory_handles: [],
+                            event_to_name: {},
+                            instance_to_name: { '-1': 'OS' },
+                            current_value: {},
+                            current_time: 0,
+
+                            current_count: {},
+                            current_last_time: {},
+                            current_total_time: {},
+                            current_min_time: {},
+                            current_max_time: {},
+                        };
+                                                
+                        log[-1] = { x: [], y: [] };
+                        state.current_time = data.time;
+                        state.current_last_time[-1] = data.time;
+                        stamp();
+                        state.current_value[-1] = 1;
+                        stamp();
+                        state.heap = data.heap;
+                        state.memory_values.push(data.heap);
+                        state.memory_handles.push('Available');
+                        make_memory();
+                        return;
+                    }
+                    if (data.name === 'Mark_Halt') {
+                        state.current_time = data.time;
+                        done = true;
+                        stamp();
+                        clearInterval(interval);
+                        return;
+                    }
+                    if (data.name === 'Mark_Start') {
+                        state.current_time = data.time;
+                        state.current_last_time[data.instance] = data.time;
+                        stamp();
+                        state.current_value[data.instance] = 1;
+                        stamp();
+                        return;
+                    }
+                    if (data.name === 'Mark_Stop') {
+                        state.current_time = data.time;
+                        update_time_metrics(data.time, data.instance);
+                        stamp();
+                        state.current_value[data.instance] = 0;
+                        stamp();
+                        return;
+                    }
+                    if (data.name === 'Mark_Event') {
+                        // state.current_time = data.time;
+                        // state.event = data.event;
+                        // stamp();
+                        return;
+                    }
+                    if (data.name === 'Mark_Idle') {
+                        state.current_time = data.time;
+                        update_time_metrics(data.time, -1);
+                        stamp();
+                        state.current_value[-1] = 0;
+                        stamp();
+                        return;
+                    }
+                    if (data.name === 'Mark_Wake') {
+                        state.current_time = data.time;
+                        state.current_last_time[-1] = data.time;
+                        stamp();
+                        state.current_value[-1] = 1;
+                        stamp();
+                        return;
+                    }
+                }
+            };
+
+            $(document).ready(() => {
+                interval = setInterval(get_data, 100);   
+            });
+
+            
+        </script>
+    </head>
+    <body>
+        <div class="bg-light p-4">
+            <div class="row m-4">
+                <div class="col shadow bg-white rounded">
+                    <div id="trace"></div>
+                    <div class="spin-box p-5 d-flex justify-content-center">
+                        <div class="spinner-border" role="status">
+                            <span class="sr-only">Loading...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="row m-4 mt-0">
+                <div class="col-sm mr-4 shadow bg-white rounded">
+                    <div id="memory"></div>
+                    <div class="spin-box p-5 d-flex justify-content-center">
+                        <div class="spinner-border" role="status">
+                            <span class="sr-only">Loading...</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-sm ml-4 shadow bg-white rounded">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th scope="col">Task</th>
+                                <th scope="col">Times Run (#)</th>
+                                <th scope="col">CPU Util. (%)</th>
+                                <th scope="col">Total Time (ms)</th>
+                                <th scope="col">Average Time (ms)</th>
+                                <th scope="col">Minimum Time (ms)</th>
+                                <th scope="col">Maximum Time (ms)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="metrics">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </body>
+</html>
