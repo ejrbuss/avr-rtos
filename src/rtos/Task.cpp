@@ -263,14 +263,15 @@ namespace Task {
             Memory::Pool::cons(task, tasks);
             return task;
         } else {
+            Task_t * current = tasks;
             for (;;) {
-                Task_t * cdr = Task::cdr(tasks);
+                Task_t * cdr = Task::cdr(current);
                 if (cdr == nullptr || Task::time_next(cdr) > time_next) {
-                    Memory::Pool::cons(tasks, task);
+                    Memory::Pool::cons(current, task);
                     Memory::Pool::cons(task, cdr);
                     break;
                 }
-                tasks = cdr;
+                current = cdr;
             }
         }
         return tasks;
